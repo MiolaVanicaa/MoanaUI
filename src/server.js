@@ -4,6 +4,7 @@ const MTProto = require('@mtproto/core');
 const { Redis } = require('@upstash/redis');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const fs = require('fs').promises;
 const cors = require('cors');
 
 const app = express();
@@ -91,56 +92,57 @@ try {
 
 // Parse Telethon .session file
 async function parseTelethonSession(buffer) {
-  return new Promise((resolve, reject) => {
-    // Initialize in-memory SQLite database
-    const db = new sqlite3.Database(':memory:', (err) => {
-      if (err) {
-        console.error('Failed to initialize SQLite database:', err);
-        return reject(err);
-      }
-    });
+  return new Promise(async (resolve, reject) => {
+    // Write buffer to a temporary file (Render's /tmp is writable)
+    const tempFilePath = `/tmp/session-${Date.now()}.db`;
+    try {
+      await fs.writeFile(tempFilePath, buffer);
 
-    db.serialize(() => $
+      // Initialize SQLite database from the temporary file
+      const db = new sqlite3.Database(tempFilePath, sqlite3.OPEN_READONLY, (err) => {
+        if (err) {
+          console.error('Failed to open SQLite database:', err);
+          return reject(err);
+        }
+      });
 
-      // Load buffer into SQLite (Telethon .session is SQLite format)
-      try {
-        // Since sqlite3 doesn't support direct buffer loading, we need to use a workaround
-        // We'll assume the buffer is a valid SQLite database and query it directly
-        db.run('ATTACH DATABASE ? AS session_db', [':memory:'], (err) => {
+      db.serialize(() => {
+        // Query the sessions table
+        db.get('SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions', (err, row) => {
           if (err) {
-            console.error('Failed to attach database:', err);
+            console.error('Failed to query sessions table:', err);
+            db.close();
+            fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
             return reject(err);
           }
+          if (!row) {
+            db.close();
+            fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+            return reject(new Error('No session data found in .session file'));
+          }
 
-          // Query the sessions table
-          db.get('SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions', (err, row) => {
-            if (err) {
-              console.error('Failed to query sessions table:', err);
-              return reject(err);
-            }
-            if (!row) {
-              return reject(new Error('No session data found in .session file'));
-            }
+          const sessionData = {
+            dc_id: row.dc_id,
+            server_address: row.server_address,
+            port: row.port,
+            auth_key: row.auth_key ? row.auth_key.toString('hex') : null,
+            takeout_id: row.takeout_id || null,
+          };
 
-            resolve({
-              dc_id: row.dc_id,
-              server_address: row.server_address,
-              port: row.port,
-              auth_key: row.auth_key ? row.auth_key.toString('hex') : null,
-              takeout_id: row.takeout_id || null,
-            });
-
-            // Close database
-            db.close((closeErr) => {
-              if (closeErr) console.error('Failed to close database:', closeErr);
-            });
+          // Close database and delete temp file
+          db.close((closeErr) => {
+            if (closeErr) console.error('Failed to close database:', closeErr);
+            fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
           });
+
+          resolve(sessionData);
         });
-      } catch (err) {
-        console.error('Error processing SQLite buffer:', err);
-        reject(err);
-      }
-    });
+      });
+    } catch (err) {
+      console.error('Error processing .session file:', err);
+      fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+      reject(err);
+    }
   });
 }
 
