@@ -5,6 +5,7 @@ const { Redis } = require('@upstash/redis');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs').promises;
+const crypto = require('crypto');
 const cors = require('cors');
 
 const app = express();
@@ -90,52 +91,93 @@ try {
   throw err;
 }
 
-// Parse Telethon .session file
+// Validate and parse Telethon .session file
 async function parseTelethonSession(buffer) {
   return new Promise(async (resolve, reject) => {
-    // Write buffer to a temporary file (Render's /tmp is writable)
+    // Calculate checksum to verify buffer integrity
+    const checksum = crypto.createHash('md5').update(buffer).digest('hex');
+    console.log('Uploaded .session file checksum:', checksum);
+
+    // Write buffer to a temporary file
     const tempFilePath = `/tmp/session-${Date.now()}.db`;
     try {
       await fs.writeFile(tempFilePath, buffer);
+      console.log('Temporary file written:', tempFilePath);
 
-      // Initialize SQLite database from the temporary file
+      // Verify file integrity
+      const writtenBuffer = await fs.readFile(tempFilePath);
+      const writtenChecksum = crypto.createHash('md5').update(writtenBuffer).digest('hex');
+      if (writtenChecksum !== checksum) {
+        await fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+        return reject(new Error('File corrupted during write: checksum mismatch'));
+      }
+
+      // Initialize SQLite database
       const db = new sqlite3.Database(tempFilePath, sqlite3.OPEN_READONLY, (err) => {
         if (err) {
           console.error('Failed to open SQLite database:', err);
+          fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
           return reject(err);
         }
       });
 
       db.serialize(() => {
-        // Query the sessions table
-        db.get('SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions', (err, row) => {
+        // Verify schema
+        db.all("SELECT name FROM sqlite_master WHERE type='table';", (err, tables) => {
           if (err) {
-            console.error('Failed to query sessions table:', err);
+            console.error('Failed to query schema:', err);
             db.close();
             fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
             return reject(err);
           }
-          if (!row) {
+          console.log('Tables in .session file:', tables);
+
+          if (!tables.some(table => table.name === 'sessions')) {
             db.close();
             fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
-            return reject(new Error('No session data found in .session file'));
+            return reject(new Error('No sessions table found in .session file'));
           }
 
-          const sessionData = {
-            dc_id: row.dc_id,
-            server_address: row.server_address,
-            port: row.port,
-            auth_key: row.auth_key ? row.auth_key.toString('hex') : null,
-            takeout_id: row.takeout_id || null,
-          };
+          // Query columns
+          db.all('PRAGMA table_info(sessions)', (err, columns) => {
+            if (err) {
+              console.error('Failed to query sessions table schema:', err);
+              db.close();
+              fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+              return reject(err);
+            }
+            console.log('Columns in sessions table:', columns.map(col => col.name));
 
-          // Close database and delete temp file
-          db.close((closeErr) => {
-            if (closeErr) console.error('Failed to close database:', closeErr);
-            fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+            // Query session data
+            db.get('SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions', (err, row) => {
+              if (err) {
+                console.error('Failed to query sessions table:', err);
+                db.close();
+                fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+                return reject(err);
+              }
+              if (!row) {
+                db.close();
+                fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+                return reject(new Error('No session data found in .session file'));
+              }
+
+              const sessionData = {
+                dc_id: row.dc_id,
+                server_address: row.server_address,
+                port: row.port,
+                auth_key: row.auth_key ? row.auth_key.toString('hex') : null,
+                takeout_id: row.takeout_id || null,
+              };
+
+              db.close((closeErr) => {
+                if (closeErr) console.error('Failed to close database:', closeErr);
+                fs.unlink(tempFilePath).catch(unlinkErr => console.error('Failed to delete temp file:', unlinkErr));
+              });
+
+              resolve(sessionData);
+            });
           });
-
-          resolve(sessionData);
         });
       });
     } catch (err) {
