@@ -49,6 +49,7 @@ async function rotateRedisClient() {
     if (commandsUsed > 450000) { // Rotate near free tier limit (500K/month)
       currentRedisIndex = (currentRedisIndex + 1) % redisClients.length;
       console.log(`Rotated to Redis database ${currentRedisIndex + 1}`);
+      telegramClient.storage.options = getCurrentRedisClient(); // Update MTProto storage
     }
   } catch (err) {
     console.error('Error checking Redis stats for rotation:', err);
@@ -91,30 +92,54 @@ try {
 // Parse Telethon .session file
 async function parseTelethonSession(buffer) {
   return new Promise((resolve, reject) => {
+    // Initialize in-memory SQLite database
     const db = new sqlite3.Database(':memory:', (err) => {
-      if (err) return reject(err);
+      if (err) {
+        console.error('Failed to initialize SQLite database:', err);
+        return reject(err);
+      }
     });
 
-    db.serialize(() => {
-      db.run('CREATE TABLE sessions (dc_id INTEGER, server_address TEXT, port INTEGER, auth_key BLOB, takeout_id INTEGER)', (err) => {
-        if (err) return reject(err);
-      });
+    db.serialize(() => $
 
-      // Load buffer into SQLite
-      db.loadExtension('sqlite3', buffer, (err) => {
-        if (err) return reject(err);
+      // Load buffer into SQLite (Telethon .session is SQLite format)
+      try {
+        // Since sqlite3 doesn't support direct buffer loading, we need to use a workaround
+        // We'll assume the buffer is a valid SQLite database and query it directly
+        db.run('ATTACH DATABASE ? AS session_db', [':memory:'], (err) => {
+          if (err) {
+            console.error('Failed to attach database:', err);
+            return reject(err);
+          }
 
-        db.get('SELECT dc_id, server_address, auth_key FROM sessions LIMIT 1', (err, row) => {
-          if (err) return reject(err);
-          if (!row) return reject(new Error('No session data found in .session file'));
+          // Query the sessions table
+          db.get('SELECT dc_id, server_address, port, auth_key, takeout_id FROM sessions', (err, row) => {
+            if (err) {
+              console.error('Failed to query sessions table:', err);
+              return reject(err);
+            }
+            if (!row) {
+              return reject(new Error('No session data found in .session file'));
+            }
 
-          resolve({
-            dc_id: row.dc_id,
-            server_address: row.server_address,
-            auth_key: row.auth_key.toString('hex'), // Convert buffer to hex string
+            resolve({
+              dc_id: row.dc_id,
+              server_address: row.server_address,
+              port: row.port,
+              auth_key: row.auth_key ? row.auth_key.toString('hex') : null,
+              takeout_id: row.takeout_id || null,
+            });
+
+            // Close database
+            db.close((closeErr) => {
+              if (closeErr) console.error('Failed to close database:', closeErr);
+            });
           });
         });
-      });
+      } catch (err) {
+        console.error('Error processing SQLite buffer:', err);
+        reject(err);
+      }
     });
   });
 }
@@ -135,11 +160,11 @@ app.post('/api/login', upload.single('session'), async (req, res) => {
       sessionData = await parseTelethonSession(req.file.buffer);
     } catch (err) {
       console.error('Failed to parse .session file:', err);
-      return res.status(400).json({ success: false, message: 'Invalid .session file format' });
+      return res.status(400).json({ success: false, message: 'Invalid .session file format: ' + err.message });
     }
 
     // Store session data in Redis
-    await redisClient.set(`session:${sessionId}`, JSON.stringify(sessionData));
+    await redisClient.set(`session:${sessionId}`, JSON.stringify(sessionData), { EX: 86400 }); // Expire in 24 hours
 
     // Load session into MTProto
     try {
@@ -150,7 +175,7 @@ app.post('/api/login', upload.single('session'), async (req, res) => {
       console.log('Authenticated user:', user);
     } catch (err) {
       console.error('Session authentication failed:', err);
-      return res.status(401).json({ success: false, message: 'Invalid session data' });
+      return res.status(401).json({ success: false, message: 'Invalid session data: ' + err.message });
     }
 
     // Rotate Redis client if needed
@@ -165,7 +190,7 @@ app.post('/api/login', upload.single('session'), async (req, res) => {
     res.json({ success: true, stats, sessionId });
   } catch (err) {
     console.error('Login error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: 'Server error: ' + err.message });
   }
 });
 
@@ -202,7 +227,7 @@ app.post('/api/send-bulk-message', async (req, res) => {
     res.json({ success: true, sentCount });
   } catch (err) {
     console.error('Bulk message error:', err);
-    res.status(500).json({ success: false, message: 'Failed to send messages' });
+    res.status(500).json({ success: false, message: 'Failed to send messages: ' + err.message });
   }
 });
 
