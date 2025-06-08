@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { MTProto } = require('@mtproto/core');
+const MTProto = require('@mtproto/core'); // Ensure correct import
 const path = require('path');
 const cors = require('cors');
 
@@ -10,18 +10,23 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Middleware
-app.use(cors()); // Allow frontend requests
+app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '../public'))); // Serve frontend
+app.use(express.static(path.join(__dirname, '../public')));
 
 // Telegram API client
-const mtproto = new MTProto({
-  api_id: process.env.API_ID, // Set in Render environment variables
-  api_hash: process.env.API_HASH,
-});
-
-// Store authenticated session (in-memory for Render free tier)
 let telegramClient = null;
+
+try {
+  telegramClient = new MTProto({
+    api_id: process.env.API_ID,
+    api_hash: process.env.API_HASH,
+    test: false, // Use production Telegram servers
+  });
+  console.log('MTProto initialized successfully');
+} catch (err) {
+  console.error('Failed to initialize MTProto:', err);
+}
 
 // Login with .session file
 app.post('/api/login', upload.single('session'), async (req, res) => {
@@ -30,30 +35,30 @@ app.post('/api/login', upload.single('session'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid .session file' });
     }
 
-    // Parse session data (assumes .session file is compatible with MTProto)
-    const sessionData = req.file.buffer.toString(); // Adjust based on your .session format
-    telegramClient = new MTProto({
-      api_id: process.env.API_ID,
-      api_hash: process.env.API_HASH,
-      session: sessionData, // Custom parsing may be needed
-    });
+    // Parse session data (custom parsing may be needed)
+    const sessionData = req.file.buffer.toString();
+    if (!telegramClient) {
+      return res.status(500).json({ success: false, message: 'Telegram client not initialized' });
+    }
 
-    // Verify session (example: check if authenticated)
+    // Attempt to set session (this is pseudo-code; adjust based on actual .session format)
     try {
+      telegramClient.storage.set('session', sessionData); // Example; may need custom logic
       await telegramClient.call('users.getFullUser', { id: { _: 'inputUserSelf' } });
     } catch (err) {
+      console.error('Session authentication failed:', err);
       return res.status(401).json({ success: false, message: 'Invalid session file' });
     }
 
     // Fetch example stats (replace with real Telegram API calls)
     const stats = {
-      messages: 100, // Example: Fetch from messages.getHistory
-      groups: 5,     // Example: Fetch from channels.getChannels
+      messages: 100,
+      groups: 5,
     };
 
     res.json({ success: true, stats });
   } catch (err) {
-    console.error(err);
+    console.error('Login error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -72,8 +77,7 @@ app.post('/api/send-bulk-message', async (req, res) => {
   try {
     let sentCount = 0;
     for (const recipient of recipients) {
-      // Rate limiting to comply with Telegram API (e.g., 20 messages/sec)
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise(resolve => setTimeout(resolve, 50)); // Rate limit
       await telegramClient.call('messages.sendMessage', {
         peer: { _: 'inputPeerUser', user_id: parseInt(recipient) },
         message,
@@ -83,12 +87,12 @@ app.post('/api/send-bulk-message', async (req, res) => {
     }
     res.json({ success: true, sentCount });
   } catch (err) {
-    console.error(err);
+    console.error('Bulk message error:', err);
     res.status(500).json({ success: false, message: 'Failed to send messages' });
   }
 });
 
-// Health check for Render
+// Health check
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // Start server
