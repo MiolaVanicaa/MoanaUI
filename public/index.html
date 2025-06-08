@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Web UI</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .fade-in { animation: fadeIn 0.5s; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  </style>
+</head>
+<body class="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-white transition-colors duration-300">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    function App() {
+      const [isLoggedIn, setIsLoggedIn] = useState(false);
+      const [file, setFile] = useState(null);
+      const [stats, setStats] = useState({ messages: 0, groups: 0 });
+      const [theme, setTheme] = useState('light');
+      const [message, setMessage] = useState('');
+      const [recipients, setRecipients] = useState('');
+
+      // Toggle dark/light mode
+      useEffect(() => {
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+      }, [theme]);
+
+      // Initialize Chart.js when logged in
+      useEffect(() => {
+        if (isLoggedIn) {
+          const ctx = document.getElementById('statsChart').getContext('2d');
+          new Chart(ctx, {
+            type: 'bar',
+            data: {
+              labels: ['Messages Sent', 'Groups Joined'],
+              datasets: [{
+                label: 'Telegram Activity',
+                data: [stats.messages, stats.groups],
+                backgroundColor: ['#3b82f6', '#10b981'],
+                borderColor: ['#2563eb', '#059669'],
+                borderWidth: 1,
+              }],
+            },
+            options: {
+              scales: { y: { beginAtZero: true } },
+              responsive: true,
+              maintainAspectRatio: false,
+            },
+          });
+        }
+      }, [isLoggedIn, stats]);
+
+      // Handle session file upload
+      const handleFileUpload = async (e) => {
+        const selectedFile = e.target.files[0];
+        if (!selectedFile || !selectedFile.name.endsWith('.session')) {
+          alert('Please upload a valid .session file');
+          return;
+        }
+        setFile(selectedFile);
+        const formData = new FormData();
+        formData.append('session', selectedFile);
+        try {
+          const res = await fetch('/api/login', {
+            method: 'POST',
+            body: formData,
+          });
+          const data = await res.json();
+          if (data.success) {
+            setIsLoggedIn(true);
+            setStats(data.stats);
+          } else {
+            alert('Login failed: ' + data.message);
+          }
+        } catch (err) {
+          console.error(err);
+          alert('Error uploading session file');
+        }
+      };
+
+      // Handle bulk messaging
+      const handleBulkMessage = async () => {
+        if (!message || !recipients) {
+          alert('Please enter a message and recipient IDs');
+          return;
+        }
+        try {
+          const res = await fetch('/api/send-bulk-message', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, recipients: recipients.split(',').map(id => id.trim()) }),
+          });
+          const data = await res.json();
+          if (data.success) {
+            alert('Messages sent successfully!');
+            setStats(prev => ({ ...prev, messages: prev.messages + data.sentCount }));
+          } else {
+            alert('Failed to send messages: ' + data.message);
+          }
+        } catch (err) {
+          console.error(err);
+          alert('Error sending bulk messages');
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col items-center p-4 fade-in">
+          <div className="flex justify-between w-full max-w-4xl mb-6">
+            <h1 className="text-3xl font-bold">Telegram Web UI</h1>
+            <button
+              className="bg-gray-200 dark:bg-gray-700 px-4 py-2 rounded hover:bg-gray-300 dark:hover:bg-gray-600"
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+            >
+              {theme === 'light' ? 'Dark Mode' : 'Light Mode'}
+            </button>
+          </div>
+
+          {!isLoggedIn ? (
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg w-full max-w-md">
+              <h2 className="text-xl font-semibold mb-4">Login with .session File</h2>
+              <input
+                type="file"
+                accept=".session"
+                onChange={handleFileUpload}
+                className="mb-4 w-full text-gray-900 dark:text-white"
+              />
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                Upload your Telegram .session file to log in.
+              </p>
+            </div>
+          ) : (
+            <div className="w-full max-w-4xl space-y-6">
+              <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 className="text-xl font-semibold mb-4">Dashboard</h2>
+                <div className="h-64">
+                  <canvas id="statsChart"></canvas>
+                </div>
+                <div className="grid grid-cols-2 gap-4 mt-4">
+                  <div className="bg-blue-100 dark:bg-blue-900 p-4 rounded">
+                    <p className="text-lg font-semibold">{stats.messages}</p>
+                    <p>Messages Sent</p>
+                  </div>
+                  <div className="bg-green-100 dark:bg-green-900 p-4 rounded">
+                    <p className="text-lg font-semibold">{stats.groups}</p>
+                    <p>Groups Joined</p>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 className="text-xl font-semibold mb-4">Mass Marketing Tools</h2>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Message</label>
+                    <textarea
+                      value={message}
+                      onChange={(e) => setMessage(e.target.value)}
+                      className="w-full p-2 rounded bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white"
+                      rows="4"
+                      placeholder="Enter your message"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Recipient IDs (comma-separated)</label>
+                    <input
+                      type="text"
+                      value={recipients}
+                      onChange={(e) => setRecipients(e.target.value)}
+                      className="w-full p-2 rounded bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white"
+                      placeholder="e.g., 123456,789012"
+                    />
+                  </div>
+                  <button
+                    className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+                    onClick={handleBulkMessage}
+                  >
+                    Send Bulk Message
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
