@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const MTProto = require('@mtproto/core');
 const { Redis } = require('@upstash/redis');
+const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const cors = require('cors');
 
@@ -15,7 +16,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Multiple Redis database credentials (for rotation)
+// Multiple Redis database credentials for rotation
 const redisConfigs = [
   {
     url: process.env.UPSTASH_REDIS_REST_URL_1,
@@ -25,40 +26,47 @@ const redisConfigs = [
 ];
 
 // Initialize Redis clients
-const redisClients = redisConfigs.map(config => new Redis({
-  url: config.url,
-  token: config.token,
-}));
+const redisClients = redisConfigs.map(config => {
+  if (!config.url || !config.token) {
+    console.error('Missing Redis credentials for config:', config);
+    return null;
+  }
+  return new Redis({ url: config.url, token: config.token });
+}).filter(client => client !== null);
 
-// Simple rotation logic based on usage or index
+// Rotation logic
 let currentRedisIndex = 0;
 function getCurrentRedisClient() {
+  if (redisClients.length === 0) throw new Error('No valid Redis clients configured');
   return redisClients[currentRedisIndex];
 }
 
-// Rotate Redis client (e.g., based on usage or schedule)
 async function rotateRedisClient() {
-  const currentClient = getCurrentRedisClient();
-  const stats = await currentClient.info('stats'); // Check usage
-  const commandsUsed = parseInt(stats.total_commands_processed || '0', 10);
-  if (commandsUsed > 450000) { // Rotate if nearing free tier limit (500K/month)
-    currentRedisIndex = (currentRedisIndex + 1) % redisClients.length;
-    console.log(`Rotated to Redis database ${currentRedisIndex + 1}`);
+  try {
+    const currentClient = getCurrentRedisClient();
+    const stats = await currentClient.info('stats');
+    const commandsUsed = parseInt(stats.total_commands_processed || '0', 10);
+    if (commandsUsed > 450000) { // Rotate near free tier limit (500K/month)
+      currentRedisIndex = (currentRedisIndex + 1) % redisClients.length;
+      console.log(`Rotated to Redis database ${currentRedisIndex + 1}`);
+    }
+  } catch (err) {
+    console.error('Error checking Redis stats for rotation:', err);
   }
 }
 
-// Telegram API client with custom Redis storage
+// Custom Redis storage for MTProto
 class RedisStorage {
   constructor(redisClient) {
     this.redis = redisClient;
   }
 
   async set(key, value) {
-    await this.redis.set(`session:${key}`, value);
+    await this.redis.set(`mtproto:${key}`, value);
   }
 
   async get(key) {
-    return await this.redis.get(`session:${key}`);
+    return await this.redis.get(`mtproto:${key}`);
   }
 }
 
@@ -71,13 +79,44 @@ try {
     test: false,
     storageOptions: {
       instance: RedisStorage,
-      options: getCurrentRedisClient(), // Pass current Redis client
+      options: getCurrentRedisClient(),
     },
   });
   console.log('MTProto initialized successfully');
 } catch (err) {
   console.error('Failed to initialize MTProto:', err);
   throw err;
+}
+
+// Parse Telethon .session file
+async function parseTelethonSession(buffer) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(':memory:', (err) => {
+      if (err) return reject(err);
+    });
+
+    db.serialize(() => {
+      db.run('CREATE TABLE sessions (dc_id INTEGER, server_address TEXT, port INTEGER, auth_key BLOB, takeout_id INTEGER)', (err) => {
+        if (err) return reject(err);
+      });
+
+      // Load buffer into SQLite
+      db.loadExtension('sqlite3', buffer, (err) => {
+        if (err) return reject(err);
+
+        db.get('SELECT dc_id, server_address, auth_key FROM sessions LIMIT 1', (err, row) => {
+          if (err) return reject(err);
+          if (!row) return reject(new Error('No session data found in .session file'));
+
+          resolve({
+            dc_id: row.dc_id,
+            server_address: row.server_address,
+            auth_key: row.auth_key.toString('hex'), // Convert buffer to hex string
+          });
+        });
+      });
+    });
+  });
 }
 
 // Login with .session file
@@ -87,24 +126,31 @@ app.post('/api/login', upload.single('session'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid .session file' });
     }
 
-    // Parse session data (assuming stringified JSON or raw string)
-    const sessionData = req.file.buffer.toString();
     const redisClient = getCurrentRedisClient();
+    const sessionId = `user:${Date.now()}`;
 
-    // Store session in Redis
-    const sessionId = `user:${Date.now()}`; // Unique session ID
-    await redisClient.set(`session:${sessionId}`, sessionData);
+    // Parse Telethon .session file
+    let sessionData;
+    try {
+      sessionData = await parseTelethonSession(req.file.buffer);
+    } catch (err) {
+      console.error('Failed to parse .session file:', err);
+      return res.status(400).json({ success: false, message: 'Invalid .session file format' });
+    }
+
+    // Store session data in Redis
+    await redisClient.set(`session:${sessionId}`, JSON.stringify(sessionData));
 
     // Load session into MTProto
     try {
-      telegramClient.storage.set('session', sessionData);
+      await telegramClient.storage.set('session', JSON.stringify(sessionData));
       const user = await telegramClient.call('users.getFullUser', {
         id: { _: 'inputUserSelf' },
       });
       console.log('Authenticated user:', user);
     } catch (err) {
       console.error('Session authentication failed:', err);
-      return res.status(401).json({ success: false, message: 'Invalid session file' });
+      return res.status(401).json({ success: false, message: 'Invalid session data' });
     }
 
     // Rotate Redis client if needed
@@ -112,8 +158,8 @@ app.post('/api/login', upload.single('session'), async (req, res) => {
 
     // Fetch example stats (replace with real Telegram API calls)
     const stats = {
-      messages: 100,
-      groups: 5,
+      messages: 100, // Example: await telegramClient.call('messages.getHistory', ...)
+      groups: 5,     // Example: await telegramClient.call('channels.getChannels', ...)
     };
 
     res.json({ success: true, stats, sessionId });
@@ -129,12 +175,19 @@ app.post('/api/send-bulk-message', async (req, res) => {
     return res.status(401).json({ success: false, message: 'Not authenticated' });
   }
 
-  const { message, recipients } = req.body;
-  if (!message || !recipients || !Array.isArray(recipients)) {
+  const { message, recipients, sessionId } = req.body;
+  if (!message || !recipients || !Array.isArray(recipients) || !sessionId) {
     return res.status(400).json({ success: false, message: 'Invalid input' });
   }
 
+  const redisClient = getCurrentRedisClient();
+  const sessionData = await redisClient.get(`session:${sessionId}`);
+  if (!sessionData) {
+    return res.status(401).json({ success: false, message: 'Session expired or invalid' });
+  }
+
   try {
+    await telegramClient.storage.set('session', sessionData); // Reload session
     let sentCount = 0;
     for (const recipient of recipients) {
       await new Promise(resolve => setTimeout(resolve, 50)); // Rate limit
@@ -145,7 +198,7 @@ app.post('/api/send-bulk-message', async (req, res) => {
       });
       sentCount++;
     }
-    await rotateRedisClient(); // Check rotation after bulk operation
+    await rotateRedisClient();
     res.json({ success: true, sentCount });
   } catch (err) {
     console.error('Bulk message error:', err);
