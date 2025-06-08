@@ -25,8 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static files (frontend)
-app.mount("/public", StaticFiles(directory="public"), name="public")
+# Mount static files (frontend) using absolute path
+public_dir = os.path.join(os.path.dirname(__file__), "../public")
+if not os.path.exists(public_dir):
+    logger.error(f"Public directory not found at {public_dir}")
+    raise RuntimeError(f"Directory '{public_dir}' does not exist")
+app.mount("/public", StaticFiles(directory=public_dir), name="public")
 
 # Redis configurations for rotation
 redis_configs = [
@@ -34,7 +38,6 @@ redis_configs = [
         "url": os.getenv('UPSTASH_REDIS_REST_URL_1'),
         "token": os.getenv('UPSTASH_REDIS_REST_TOKEN_1'),
     }
-    # Add more databases as needed
 ]
 
 # Initialize Redis connection pools
