@@ -33,11 +33,7 @@ redis_configs = [
     {
         "url": os.getenv('UPSTASH_REDIS_REST_URL_1'),
         "token": os.getenv('UPSTASH_REDIS_REST_TOKEN_1'),
-    },
-    {
-        "url": os.getenv('UPSTASH_REDIS_REST_URL_2'),
-        "token": os.getenv('UPSTASH_REDIS_REST_TOKEN_2'),
-    },
+    }
     # Add more databases as needed
 ]
 
