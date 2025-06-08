@@ -28,7 +28,7 @@
       const [theme, setTheme] = useState('light');
       const [message, setMessage] = useState('');
       const [recipients, setRecipients] = useState('');
-      const [sessionId, setSessionId] = useState(null); // Store sessionId
+      const [sessionId, setSessionId] = useState(null);
 
       // Toggle dark/light mode
       useEffect(() => {
@@ -69,7 +69,7 @@
         }
         setFile(selectedFile);
         const formData = new FormData();
-        formData.append('your_session_file', selectedFile); // Match Python's expected field name
+        formData.append('file', selectedFile);
         try {
           const res = await fetch('/api/login', {
             method: 'POST',
@@ -79,7 +79,7 @@
           if (data.success) {
             setIsLoggedIn(true);
             setStats(data.stats);
-            setSessionId(data.sessionId); // Store sessionId
+            setSessionId(data.sessionId);
           } else {
             alert('Login failed: ' + data.message);
           }
